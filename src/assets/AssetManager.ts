@@ -18,6 +18,15 @@ export interface AssetEntry {
   licenseUrl: string;
 }
 
+export interface FetchOptions {
+  /** Progress callback: receives (loaded, total) bytes. total may be 0 if unknown. */
+  onProgress?: (loaded: number, total: number) => void;
+  /** Number of retries on failure (default: 1) */
+  retries?: number;
+  /** Delay between retries in ms (default: 2000, doubles each retry) */
+  retryDelay?: number;
+}
+
 /** Built-in asset registry */
 export const ASSET_REGISTRY: Record<string, AssetEntry> = {
   ellie: {
@@ -41,24 +50,71 @@ export class AssetManager {
    * Get a usable URL for the named asset.
    * If not cached, fetches from the remote URL and creates a blob URL.
    */
-  async getAssetUrl(assetKey: string): Promise<string> {
+  async getAssetUrl(assetKey: string, opts?: FetchOptions): Promise<string> {
     const cached = this.cache.get(assetKey);
     if (cached) return cached;
 
     const entry = ASSET_REGISTRY[assetKey];
     if (!entry) {
-      throw new Error(`Unknown asset: "${assetKey}". Available: ${Object.keys(ASSET_REGISTRY).join(", ")}`);
+      throw new Error(
+        `Unknown asset: "${assetKey}". Available: ${Object.keys(ASSET_REGISTRY).join(", ")}`,
+      );
     }
 
-    const response = await fetch(entry.remoteUrl);
+    const retries = opts?.retries ?? 1;
+    const baseDelay = opts?.retryDelay ?? 2000;
+
+    let lastError: Error | null = null;
+
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const blobUrl = await this.fetchWithProgress(entry.remoteUrl, opts?.onProgress);
+        this.cache.set(assetKey, blobUrl);
+        return blobUrl;
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+
+        if (attempt < retries) {
+          const delay = baseDelay * Math.pow(2, attempt);
+          await new Promise((r) => setTimeout(r, delay));
+        }
+      }
+    }
+
+    throw lastError ?? new Error(`Failed to fetch asset "${assetKey}"`);
+  }
+
+  private async fetchWithProgress(
+    url: string,
+    onProgress?: (loaded: number, total: number) => void,
+  ): Promise<string> {
+    const response = await fetch(url);
     if (!response.ok) {
-      throw new Error(`Failed to fetch asset "${assetKey}": ${response.status} ${response.statusText}`);
+      throw new Error(`HTTP ${response.status} ${response.statusText}`);
     }
 
-    const blob = await response.blob();
-    const blobUrl = URL.createObjectURL(blob);
-    this.cache.set(assetKey, blobUrl);
-    return blobUrl;
+    if (!onProgress || !response.body) {
+      // No progress tracking needed, simple path
+      const blob = await response.blob();
+      return URL.createObjectURL(blob);
+    }
+
+    // Stream with progress
+    const contentLength = Number(response.headers.get("Content-Length") || 0);
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let loaded = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      loaded += value.length;
+      onProgress(loaded, contentLength);
+    }
+
+    const blob = new Blob(chunks as BlobPart[], { type: "model/gltf-binary" });
+    return URL.createObjectURL(blob);
   }
 
   /** Get attribution info for an asset */

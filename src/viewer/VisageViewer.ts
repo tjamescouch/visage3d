@@ -15,10 +15,16 @@ export interface VisageViewerOptions {
   autoPlay?: boolean;
   /** Device pixel ratio (default: window.devicePixelRatio) */
   pixelRatio?: number;
+  /** Show fallback silhouette if model fails to load (default: true) */
+  showFallback?: boolean;
 }
 
+export type LoadResult =
+  | { ok: true; animations: string[]; morphTargets: string[] }
+  | { ok: false; error: Error; fallback: true };
+
 /**
- * VisageViewer — renders a GLB avatar model with animation support.
+ * VisageViewer — renders a GLB avatar model with animation + morph target support.
  *
  * Designed as a standalone, reusable component. Mount it in any container element.
  * Handles its own resize observer, render loop, and cleanup.
@@ -37,6 +43,9 @@ export class VisageViewer {
 
   private animations: THREE.AnimationClip[] = [];
   private activeAction: THREE.AnimationAction | null = null;
+
+  /** All meshes with morph targets, keyed by morph target name → {mesh, index} */
+  private morphTargetMap = new Map<string, { mesh: THREE.Mesh; index: number }[]>();
 
   constructor(private opts: VisageViewerOptions) {
     this.container = opts.container;
@@ -81,56 +90,126 @@ export class VisageViewer {
   }
 
   private setupLighting(): void {
-    // Ambient
     const ambient = new THREE.AmbientLight(0xffffff, 0.4);
     this.scene.add(ambient);
 
-    // Key light (warm, from upper-right)
     const key = new THREE.DirectionalLight(0xfff5e6, 1.2);
     key.position.set(2, 3, 2);
     key.castShadow = true;
     key.shadow.mapSize.set(1024, 1024);
     this.scene.add(key);
 
-    // Fill light (cool, from left)
     const fill = new THREE.DirectionalLight(0xe6f0ff, 0.5);
     fill.position.set(-2, 2, 1);
     this.scene.add(fill);
 
-    // Rim light (from behind)
     const rim = new THREE.DirectionalLight(0xffffff, 0.3);
     rim.position.set(0, 2, -3);
     this.scene.add(rim);
   }
 
-  /** Load the GLB model and optionally start animation */
-  async load(): Promise<void> {
+  /**
+   * Load the GLB model. Returns info about available animations and morph targets.
+   * On failure, shows a fallback silhouette if opts.showFallback is true.
+   */
+  async load(): Promise<LoadResult> {
     const loader = new GLTFLoader();
 
-    const gltf: GLTF = await new Promise((resolve, reject) => {
-      loader.load(
-        this.opts.modelUrl,
-        resolve,
-        undefined,
-        reject,
-      );
+    try {
+      const gltf: GLTF = await new Promise((resolve, reject) => {
+        loader.load(this.opts.modelUrl, resolve, undefined, reject);
+      });
+
+      this.scene.add(gltf.scene);
+
+      // Index morph targets
+      this.indexMorphTargets(gltf.scene);
+
+      // Store animations
+      this.animations = gltf.animations;
+
+      if (this.animations.length > 0) {
+        this.mixer = new THREE.AnimationMixer(gltf.scene);
+        if (this.opts.autoPlay !== false) {
+          this.playAnimation(0);
+        }
+      }
+
+      this.startRenderLoop();
+
+      return {
+        ok: true,
+        animations: this.animations.map((c) => c.name),
+        morphTargets: Array.from(this.morphTargetMap.keys()),
+      };
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+
+      if (this.opts.showFallback !== false) {
+        this.showFallbackSilhouette();
+        this.startRenderLoop();
+      }
+
+      return { ok: false, error, fallback: true };
+    }
+  }
+
+  /** Display a simple head silhouette as fallback */
+  private showFallbackSilhouette(): void {
+    // Simple sphere head + cylinder neck
+    const headGeo = new THREE.SphereGeometry(0.15, 32, 24);
+    const neckGeo = new THREE.CylinderGeometry(0.06, 0.08, 0.1, 16);
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0x404060,
+      roughness: 0.8,
+      metalness: 0.1,
     });
 
-    this.scene.add(gltf.scene);
+    const head = new THREE.Mesh(headGeo, mat);
+    head.position.set(0, 1.55, 0);
+    this.scene.add(head);
 
-    // Store animations
-    this.animations = gltf.animations;
+    const neck = new THREE.Mesh(neckGeo, mat);
+    neck.position.set(0, 1.35, 0);
+    this.scene.add(neck);
+  }
 
-    if (this.animations.length > 0) {
-      this.mixer = new THREE.AnimationMixer(gltf.scene);
+  /** Walk the scene graph and index all morph targets by name */
+  private indexMorphTargets(root: THREE.Object3D): void {
+    root.traverse((child) => {
+      if (!(child instanceof THREE.Mesh)) return;
+      const geo = child.geometry;
+      if (!geo.morphAttributes || !child.morphTargetDictionary) return;
 
-      if (this.opts.autoPlay !== false) {
-        this.playAnimation(0);
+      for (const [name, index] of Object.entries(child.morphTargetDictionary)) {
+        const existing = this.morphTargetMap.get(name) ?? [];
+        existing.push({ mesh: child, index });
+        this.morphTargetMap.set(name, existing);
+      }
+    });
+  }
+
+  /**
+   * Set morph target influences by name.
+   * Values are 0..1. Unknown names are silently ignored.
+   */
+  setMorphTargets(targets: Record<string, number>): void {
+    for (const [name, value] of Object.entries(targets)) {
+      const entries = this.morphTargetMap.get(name);
+      if (!entries) continue;
+
+      const clamped = Math.max(0, Math.min(1, value));
+      for (const { mesh, index } of entries) {
+        if (mesh.morphTargetInfluences) {
+          mesh.morphTargetInfluences[index] = clamped;
+        }
       }
     }
+  }
 
-    // Start render loop
-    this.startRenderLoop();
+  /** Get all available morph target names */
+  getMorphTargetNames(): string[] {
+    return Array.from(this.morphTargetMap.keys());
   }
 
   /** Play animation by index */
@@ -189,7 +268,6 @@ export class VisageViewer {
     this.mixer?.stopAllAction();
     this.renderer.dispose();
 
-    // Remove canvas from DOM
     if (this.renderer.domElement.parentElement) {
       this.renderer.domElement.parentElement.removeChild(this.renderer.domElement);
     }
