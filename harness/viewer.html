@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>visage3d — viewer harness</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0d0d1a; color: #c0c0d0; font-family: monospace; }
+    #viewer-container {
+      width: 100vw;
+      height: 100vh;
+    }
+    #controls {
+      position: fixed;
+      top: 1rem;
+      left: 1rem;
+      z-index: 10;
+      background: rgba(13, 13, 26, 0.9);
+      padding: 1rem;
+      border: 1px solid #303050;
+      border-radius: 4px;
+      font-size: 0.85rem;
+    }
+    #controls h3 { color: #7070ff; margin-bottom: 0.5rem; }
+    #status { color: #50a050; margin-bottom: 0.5rem; }
+    #animation-list { margin-top: 0.5rem; }
+    #animation-list button {
+      display: block;
+      margin: 0.25rem 0;
+      background: #1a1a3a;
+      color: #c0c0d0;
+      border: 1px solid #404060;
+      padding: 0.3rem 0.6rem;
+      cursor: pointer;
+      font-family: monospace;
+      font-size: 0.8rem;
+    }
+    #animation-list button:hover { border-color: #7070ff; color: #ffffff; }
+    #attribution {
+      position: fixed;
+      bottom: 0.5rem;
+      right: 0.5rem;
+      font-size: 0.7rem;
+      color: #606080;
+      z-index: 10;
+    }
+    #attribution a { color: #5070a0; }
+  </style>
+</head>
+<body>
+  <div id="viewer-container"></div>
+  <div id="controls">
+    <h3>viewer harness</h3>
+    <div id="status">loading...</div>
+    <div id="animation-list"></div>
+  </div>
+  <div id="attribution"></div>
+  <script type="module">
+    import { VisageViewer } from "../src/viewer/VisageViewer.js";
+    import { AssetManager, ASSET_REGISTRY } from "../src/assets/AssetManager.js";
+
+    const container = document.getElementById("viewer-container");
+    const status = document.getElementById("status");
+    const animList = document.getElementById("animation-list");
+    const attribution = document.getElementById("attribution");
+
+    const assets = new AssetManager();
+
+    async function init() {
+      try {
+        status.textContent = "fetching asset...";
+
+        const url = await assets.getAssetUrl("ellie");
+        const entry = assets.getAttribution("ellie");
+
+        if (entry) {
+          attribution.innerHTML =
+            `${entry.attribution} — <a href="${entry.licenseUrl}" target="_blank">${entry.license}</a>`;
+        }
+
+        status.textContent = "loading model...";
+
+        const viewer = new VisageViewer({
+          container,
+          modelUrl: url,
+          backgroundColor: 0x0d0d1a,
+        });
+
+        await viewer.load();
+
+        const names = viewer.getAnimationNames();
+        status.textContent = `loaded — ${names.length} animation(s)`;
+
+        names.forEach((name, i) => {
+          const btn = document.createElement("button");
+          btn.textContent = name || `animation ${i}`;
+          btn.onclick = () => viewer.playAnimation(i);
+          animList.appendChild(btn);
+        });
+      } catch (err) {
+        status.textContent = `error: ${err.message}`;
+        status.style.color = "#ff5050";
+        console.error(err);
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

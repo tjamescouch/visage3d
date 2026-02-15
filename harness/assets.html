@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>visage3d — assets harness</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0d0d1a; color: #c0c0d0; font-family: monospace; padding: 2rem; }
+    h3 { color: #7070ff; margin-bottom: 1rem; }
+    .entry { 
+      border: 1px solid #303050; padding: 1rem; margin: 0.5rem 0;
+      border-radius: 4px; background: #12122a;
+    }
+    .entry .name { color: #70a0ff; font-weight: bold; }
+    .entry .license { color: #50a050; }
+    .entry a { color: #5070a0; }
+    button {
+      background: #1a1a3a; color: #c0c0d0; border: 1px solid #404060;
+      padding: 0.4rem 0.8rem; cursor: pointer; font-family: monospace;
+      margin-top: 0.5rem;
+    }
+    button:hover { border-color: #7070ff; }
+    #log { margin-top: 1rem; white-space: pre-wrap; font-size: 0.8rem; color: #808090; }
+  </style>
+</head>
+<body>
+  <h3>assets harness</h3>
+  <div id="registry"></div>
+  <pre id="log"></pre>
+  <script type="module">
+    import { AssetManager, ASSET_REGISTRY } from "../src/assets/AssetManager.js";
+
+    const registry = document.getElementById("registry");
+    const log = document.getElementById("log");
+    const assets = new AssetManager();
+
+    function appendLog(msg) {
+      log.textContent += msg + "\n";
+    }
+
+    // Render registry
+    for (const [key, entry] of Object.entries(ASSET_REGISTRY)) {
+      const div = document.createElement("div");
+      div.className = "entry";
+      div.innerHTML = `
+        <div class="name">${entry.name}</div>
+        <div class="license">${entry.license} — <a href="${entry.licenseUrl}" target="_blank">license</a></div>
+        <div>Remote: <code>${entry.remoteUrl}</code></div>
+        <div>Attribution: ${entry.attribution}</div>
+        <button data-key="${key}">Fetch & Cache</button>
+        <div class="result" id="result-${key}"></div>
+      `;
+      registry.appendChild(div);
+    }
+
+    document.querySelectorAll("button[data-key]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const key = btn.dataset.key;
+        const result = document.getElementById(`result-${key}`);
+        try {
+          appendLog(`fetching "${key}"...`);
+          const t0 = performance.now();
+          const url = await assets.getAssetUrl(key);
+          const dt = (performance.now() - t0).toFixed(0);
+          appendLog(`"${key}" cached → blob URL (${dt}ms)`);
+          result.textContent = `✓ ${url}`;
+          result.style.color = "#50a050";
+
+          // Second fetch should be instant (cached)
+          const t1 = performance.now();
+          await assets.getAssetUrl(key);
+          const dt2 = (performance.now() - t1).toFixed(0);
+          appendLog(`"${key}" cache hit (${dt2}ms)`);
+        } catch (err) {
+          appendLog(`error: ${err.message}`);
+          result.textContent = `✗ ${err.message}`;
+          result.style.color = "#ff5050";
+        }
+      });
+    });
+  </script>
+</body>
+</html>
