@@ -15,10 +15,16 @@ export interface VisageViewerOptions {
   autoPlay?: boolean;
   /** Device pixel ratio (default: window.devicePixelRatio) */
   pixelRatio?: number;
+  /** Show fallback silhouette on load failure (default: true) */
+  fallback?: boolean;
 }
 
+/** Map of morph target name → influence value (0..1) */
+export type MorphTargetMap = Record<string, number>;
+
 /**
- * VisageViewer — renders a GLB avatar model with animation support.
+ * VisageViewer — renders a GLB avatar model with animation support
+ * and emotion-driven morph target (blend shape) control.
  *
  * Designed as a standalone, reusable component. Mount it in any container element.
  * Handles its own resize observer, render loop, and cleanup.
@@ -34,9 +40,14 @@ export class VisageViewer {
   private resizeObserver: ResizeObserver;
   private container: HTMLElement;
   private disposed = false;
+  private fallbackGroup: THREE.Group | null = null;
+  private modelLoaded = false;
 
   private animations: THREE.AnimationClip[] = [];
   private activeAction: THREE.AnimationAction | null = null;
+
+  /** All meshes with morph targets, discovered after load */
+  private morphMeshes: THREE.Mesh[] = [];
 
   constructor(private opts: VisageViewerOptions) {
     this.container = opts.container;
@@ -103,33 +114,93 @@ export class VisageViewer {
     this.scene.add(rim);
   }
 
+  /**
+   * Build a fallback silhouette (sphere head + cylinder body)
+   * shown when the GLB model fails to load.
+   */
+  private buildFallback(): THREE.Group {
+    const group = new THREE.Group();
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0x303050,
+      roughness: 0.8,
+      metalness: 0.1,
+    });
+
+    // Head
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.18, 32, 24), mat);
+    head.position.set(0, 1.55, 0);
+    group.add(head);
+
+    // Neck
+    const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.07, 0.1, 16), mat);
+    neck.position.set(0, 1.35, 0);
+    group.add(neck);
+
+    // Torso
+    const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.22, 0.5, 16), mat);
+    torso.position.set(0, 1.05, 0);
+    group.add(torso);
+
+    // Lower body
+    const lower = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.15, 0.4, 16), mat);
+    lower.position.set(0, 0.6, 0);
+    group.add(lower);
+
+    return group;
+  }
+
   /** Load the GLB model and optionally start animation */
   async load(): Promise<void> {
     const loader = new GLTFLoader();
 
-    const gltf: GLTF = await new Promise((resolve, reject) => {
-      loader.load(
-        this.opts.modelUrl,
-        resolve,
-        undefined,
-        reject,
-      );
-    });
+    try {
+      const gltf: GLTF = await new Promise((resolve, reject) => {
+        loader.load(this.opts.modelUrl, resolve, undefined, reject);
+      });
 
-    this.scene.add(gltf.scene);
+      // Remove fallback if present
+      if (this.fallbackGroup) {
+        this.scene.remove(this.fallbackGroup);
+        this.fallbackGroup = null;
+      }
 
-    // Store animations
-    this.animations = gltf.animations;
+      this.scene.add(gltf.scene);
+      this.modelLoaded = true;
 
-    if (this.animations.length > 0) {
-      this.mixer = new THREE.AnimationMixer(gltf.scene);
+      // Discover all meshes with morph targets
+      this.morphMeshes = [];
+      gltf.scene.traverse((child) => {
+        if (
+          child instanceof THREE.Mesh &&
+          child.morphTargetInfluences &&
+          child.morphTargetDictionary
+        ) {
+          this.morphMeshes.push(child);
+        }
+      });
 
-      if (this.opts.autoPlay !== false) {
-        this.playAnimation(0);
+      // Store animations
+      this.animations = gltf.animations;
+
+      if (this.animations.length > 0) {
+        this.mixer = new THREE.AnimationMixer(gltf.scene);
+
+        if (this.opts.autoPlay !== false) {
+          this.playAnimation(0);
+        }
+      }
+    } catch (err) {
+      console.warn("visage3d: model load failed, showing fallback", err);
+
+      if (this.opts.fallback !== false) {
+        this.fallbackGroup = this.buildFallback();
+        this.scene.add(this.fallbackGroup);
+      } else {
+        throw err;
       }
     }
 
-    // Start render loop
+    // Start render loop regardless
     this.startRenderLoop();
   }
 
@@ -150,6 +221,82 @@ export class VisageViewer {
   /** Get list of available animation names */
   getAnimationNames(): string[] {
     return this.animations.map((c) => c.name);
+  }
+
+  // --- Morph Target API ---
+
+  /**
+   * Get all discovered morph target names across all meshes.
+   * Returns a deduplicated sorted array.
+   */
+  getMorphTargetNames(): string[] {
+    const names = new Set<string>();
+    for (const mesh of this.morphMeshes) {
+      if (mesh.morphTargetDictionary) {
+        for (const name of Object.keys(mesh.morphTargetDictionary)) {
+          names.add(name);
+        }
+      }
+    }
+    return Array.from(names).sort();
+  }
+
+  /**
+   * Set morph target influences by name.
+   * Unknown names are silently skipped.
+   * Values are clamped to [0, 1].
+   *
+   * @example
+   * viewer.setMorphTargets({ "mouthSmile": 0.8, "eyeSquintLeft": 0.3 });
+   */
+  setMorphTargets(targets: MorphTargetMap): void {
+    for (const mesh of this.morphMeshes) {
+      const dict = mesh.morphTargetDictionary;
+      const influences = mesh.morphTargetInfluences;
+      if (!dict || !influences) continue;
+
+      for (const [name, value] of Object.entries(targets)) {
+        const idx = dict[name];
+        if (idx !== undefined) {
+          influences[idx] = Math.max(0, Math.min(1, value));
+        }
+      }
+    }
+  }
+
+  /**
+   * Get current morph target influences as a map.
+   * Returns all targets with their current values.
+   */
+  getMorphTargets(): MorphTargetMap {
+    const result: MorphTargetMap = {};
+    for (const mesh of this.morphMeshes) {
+      const dict = mesh.morphTargetDictionary;
+      const influences = mesh.morphTargetInfluences;
+      if (!dict || !influences) continue;
+
+      for (const [name, idx] of Object.entries(dict)) {
+        // Last mesh wins if there are duplicates — fine for typical avatars
+        result[name] = influences[idx] ?? 0;
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Reset all morph targets to 0.
+   */
+  resetMorphTargets(): void {
+    for (const mesh of this.morphMeshes) {
+      if (mesh.morphTargetInfluences) {
+        mesh.morphTargetInfluences.fill(0);
+      }
+    }
+  }
+
+  /** Whether the 3D model loaded successfully (vs fallback) */
+  get loaded(): boolean {
+    return this.modelLoaded;
   }
 
   private startRenderLoop(): void {

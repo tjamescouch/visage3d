@@ -21,11 +21,15 @@
       border: 1px solid #303050;
       border-radius: 4px;
       font-size: 0.85rem;
+      max-height: 90vh;
+      overflow-y: auto;
+      min-width: 240px;
     }
     #controls h3 { color: #7070ff; margin-bottom: 0.5rem; }
+    #controls h4 { color: #5060a0; margin-top: 0.75rem; margin-bottom: 0.25rem; font-size: 0.8rem; }
     #status { color: #50a050; margin-bottom: 0.5rem; }
     #animation-list { margin-top: 0.5rem; }
-    #animation-list button {
+    #animation-list button, #morph-reset {
       display: block;
       margin: 0.25rem 0;
       background: #1a1a3a;
@@ -36,7 +40,30 @@
       font-family: monospace;
       font-size: 0.8rem;
     }
-    #animation-list button:hover { border-color: #7070ff; color: #ffffff; }
+    #animation-list button:hover, #morph-reset:hover { border-color: #7070ff; color: #ffffff; }
+    .morph-slider {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      margin: 0.2rem 0;
+      font-size: 0.75rem;
+    }
+    .morph-slider label {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .morph-slider input[type="range"] {
+      width: 80px;
+      accent-color: #7070ff;
+    }
+    .morph-slider .val {
+      width: 2.5em;
+      text-align: right;
+      color: #7070a0;
+    }
     #attribution {
       position: fixed;
       bottom: 0.5rem;
@@ -54,6 +81,7 @@
     <h3>viewer harness</h3>
     <div id="status">loading...</div>
     <div id="animation-list"></div>
+    <div id="morph-controls"></div>
   </div>
   <div id="attribution"></div>
   <script type="module">
@@ -63,6 +91,7 @@
     const container = document.getElementById("viewer-container");
     const status = document.getElementById("status");
     const animList = document.getElementById("animation-list");
+    const morphControls = document.getElementById("morph-controls");
     const attribution = document.getElementById("attribution");
 
     const assets = new AssetManager();
@@ -89,8 +118,15 @@
 
         await viewer.load();
 
+        // Animations
         const names = viewer.getAnimationNames();
-        status.textContent = `loaded — ${names.length} animation(s)`;
+        const morphNames = viewer.getMorphTargetNames();
+        const parts = [];
+        if (names.length) parts.push(`${names.length} anim`);
+        if (morphNames.length) parts.push(`${morphNames.length} morphs`);
+        status.textContent = viewer.loaded
+          ? `loaded — ${parts.join(", ") || "no animations or morphs"}`
+          : "fallback (model failed to load)";
 
         names.forEach((name, i) => {
           const btn = document.createElement("button");
@@ -98,6 +134,57 @@
           btn.onclick = () => viewer.playAnimation(i);
           animList.appendChild(btn);
         });
+
+        // Morph target sliders
+        if (morphNames.length > 0) {
+          const h4 = document.createElement("h4");
+          h4.textContent = `morph targets (${morphNames.length})`;
+          morphControls.appendChild(h4);
+
+          const resetBtn = document.createElement("button");
+          resetBtn.id = "morph-reset";
+          resetBtn.textContent = "reset all";
+          resetBtn.onclick = () => {
+            viewer.resetMorphTargets();
+            document.querySelectorAll(".morph-range").forEach((el) => {
+              el.value = "0";
+              el.nextElementSibling.textContent = "0.00";
+            });
+          };
+          morphControls.appendChild(resetBtn);
+
+          for (const name of morphNames) {
+            const row = document.createElement("div");
+            row.className = "morph-slider";
+
+            const label = document.createElement("label");
+            label.textContent = name;
+            label.title = name;
+
+            const range = document.createElement("input");
+            range.type = "range";
+            range.className = "morph-range";
+            range.min = "0";
+            range.max = "1";
+            range.step = "0.01";
+            range.value = "0";
+
+            const val = document.createElement("span");
+            val.className = "val";
+            val.textContent = "0.00";
+
+            range.oninput = () => {
+              const v = parseFloat(range.value);
+              val.textContent = v.toFixed(2);
+              viewer.setMorphTargets({ [name]: v });
+            };
+
+            row.appendChild(label);
+            row.appendChild(range);
+            row.appendChild(val);
+            morphControls.appendChild(row);
+          }
+        }
       } catch (err) {
         status.textContent = `error: ${err.message}`;
         status.style.color = "#ff5050";
